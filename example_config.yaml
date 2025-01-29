@@ -1,0 +1,29 @@
+# Example config.yaml
+models:
+  - name: "model1"
+    file_path: "data/mesa_model1.data"
+  - name: "model2" 
+    file_path: "data/mesa_model2.data"
+
+observations:
+  file_path: "obs_data.csv"
+
+observables:
+  - model_column: "log_L"
+    data_column: "luminosity"
+    error_column: "luminosity_err"
+    perturbation_group: "group1"
+    
+  - model_column: "log_Teff"
+    data_column: "temperature"
+    error_column: "temperature_err"
+    perturbation_group: "group2"
+
+mcmc:
+  n_walkers: 32
+  burn_in_steps: 1000
+  max_steps: 10000
+
+output:
+  directory: "results"
+  chain_file: "chains.h5"
