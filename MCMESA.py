@@ -107,105 +107,93 @@ def create_interpolators(model_data: pd.DataFrame, observables: List[Dict]) -> D
         
     return interps
 
-class ModelComparator:
-    """Main comparison engine handling MCMC analysis"""
+
+
+    class ModelComparator:
+    """Main comparison engine handling MCMC analysis for N models"""
     
     def __init__(self, config: Dict):
-        """Initialize with loaded configuration"""
+        """Initialize with loaded configuration
+        
+        Args:
+            config: Configuration dictionary from YAML
+        Raises:
+            ValueError: If invalid configuration or insufficient models
+        """
         self.config = config
         self.obs_data = None
         self.model_interps = {}
         self.perturbation_groups = {}
         self.sampler = None
+        self.n_models = len(config['models'])
         
+        if self.n_models < 2:
+            raise ValueError("At least two models required for comparison")
+            
         self._prepare_data()
         self._setup_perturbation_groups()
+
+    def _model_prediction(self, age: float, params: np.ndarray) -> Dict[str, float]:
+        """Calculate combined model prediction using multiple perturbation parameters
         
-    def _prepare_data(self):
-        """Load and validate all input data"""
-        # Load observed data
-        obs_path = self.config['observations']['file_path']
-        self.obs_data = pd.read_csv(obs_path)
-        
-        # Validate observations
-        required_cols = ['age'] + [obs['data_column'] for obs in self.config['observables']]
-        for col in required_cols:
-            if col not in self.obs_data.columns:
-                raise ValueError(f"Missing column in observed data: {col}")
-        
-        # Load MESA models
-        for model in self.config['models']:
-            data = load_mesa_data(model['file_path'])
-            self.model_interps[model['name']] = create_interpolators(
-                data, self.config['observables']
-            )
+        Args:
+            age: Stellar age to evaluate
+            params: Array of perturbation parameters (alphas)
             
+        Returns:
+            Dictionary of observable predictions
+            
+        Raises:
+            ValueError: For invalid model predictions
+        """
+        predictions = {}
+        param_idx = 0
+        base_model = self.config['models'][0]['name']
+        base_interps = self.model_interps[base_model]
+        
+        for group_name, observables in self.perturbation_groups.items():
+            # Get perturbation parameters for this group
+            n_params = self.n_models - 1
+            alphas = params[param_idx:param_idx+n_params]
+            param_idx += n_params
+            
+            for obs in observables:
+                col = obs['model_column']
+                try:
+                    base_val = base_interps[col](age)
+                except ValueError:
+                    raise ValueError(f"Invalid prediction for {col} at age {age}")
+                
+                # Start with base model prediction
+                prediction = base_val
+                
+                # Add perturbations from other models
+                for i, alpha in enumerate(alphas):
+                    model_name = self.config['models'][i+1]['name']
+                    model_val = self.model_interps[model_name][col](age)
+                    prediction += alpha * (model_val - base_val)
+                
+                predictions[col] = prediction
+                
+        return predictions
+
     def _setup_perturbation_groups(self):
-        """Group observables by perturbation parameter"""
+        """Organize observables into perturbation groups with parameter tracking"""
         groups = {}
-        for idx, obs in enumerate(self.config['observables']):
+        for obs in self.config['observables']:
             group = obs.get('perturbation_group', 'global')
             groups.setdefault(group, []).append(obs)
             
         self.perturbation_groups = groups
-        
-    def _model_prediction(self, age: float, params: np.ndarray) -> Dict[str, float]:
-        """Calculate perturbed model prediction for given age and parameters"""
-        predictions = {}
-        param_idx = 0
-        
-        for group_name, observables in self.perturbation_groups.items():
-            alpha = params[param_idx]
-            param_idx += 1
-            
-            for obs in observables:
-                col = obs['model_column']
-                m1 = self.model_interps[self.config['models'][0]['name']][col](age)
-                m2 = self.model_interps[self.config['models'][1]['name']][col](age)
-                predictions[col] = m1 + alpha * (m2 - m1)
-                
-        return predictions
-        
-    def log_prior(self, params: np.ndarray) -> float:
-        """Uniform priors for perturbation parameters"""
-        if np.any(params < -1) or np.any(params > 1):
-            return -np.inf
-        return 0.0
-        
-    def log_likelihood(self, params: np.ndarray) -> float:
-        """Calculate log likelihood for given parameters"""
-        chi2 = 0.0
-        valid_points = 0
-        
-        for _, row in self.obs_data.iterrows():
-            try:
-                pred = self._model_prediction(row['age'], params)
-            except ValueError:
-                return -np.inf
-                
-            for obs in self.config['observables']:
-                data_col = obs['data_column']
-                err_col = obs['error_column']
-                model_col = obs['model_column']
-                
-                if np.isnan(row[err_col]) or row[err_col] <= 0:
-                    continue
-                    
-                residual = (row[data_col] - pred[model_col]) / row[err_col]
-                chi2 += residual**2
-                valid_points += 1
-                
-        if valid_points == 0:
-            return -np.inf
-            
-        return -0.5 * chi2 - 0.5 * valid_points * np.log(2*np.pi)
-        
+        self.n_params_per_group = self.n_models - 1
+
     def run_mcmc(self):
-        """Perform adaptive MCMC sampling with convergence checking"""
-        # Setup sampler
-        ndim = len(self.perturbation_groups)
+        """Perform adaptive MCMC sampling with parameter space scaling"""
+        # Calculate MCMC dimensions based on model count
+        ndim = len(self.perturbation_groups) * (self.n_models - 1)
         nwalkers = self.config['mcmc']['n_walkers']
         
+        # Initialize backend and sampler
         backend = emcee.backends.HDFBackend(self.config['output']['chain_file'])
         backend.reset(nwalkers, ndim)
         
